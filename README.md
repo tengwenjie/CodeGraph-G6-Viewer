@@ -1,71 +1,83 @@
-# codegraoh-g6-viewer README
+# CodeGraph G6 Viewer
 
-This is the README for your extension "codegraoh-g6-viewer". After writing up a brief description, we recommend including the following sections.
+Interactive call-graph visualization for VS Code powered by [CodeGraph](https://www.npmjs.com/package/@colbymchenry/codegraph) and [AntV G6](https://g6.antv.antgroup.com/).
 
-## Features
+- Browse the full call graph of any file with a single right-click
+- Trace a selected symbol's callers and callees
+- Expand / collapse nodes on the fly with double-click
+- Navigate to source definitions from the graph
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+![CodeGraph G6 Viewer](images/screenshot.png)
 
 ## Requirements
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+This extension requires a **CodeGraph-indexed workspace**. On first launch it detects whether the project has been initialized and prompts you to run indexing if needed.
+
+You can also trigger indexing manually at any time:
+
+- **Command Palette** (`Ctrl+Shift+P`) → `CodeGraph: Initialize / Re-index`
+
+Indexing runs in the background via `npx @colbymchenry/codegraph init`.
+
+## Usage
+
+1. Open any source file in a CodeGraph-indexed workspace.
+2. **Right-click** the editor (no selection needed) → `CodeGraph: Show Node Graph`.
+   - **No selection**: the graph shows all functions, methods, and classes in the current file and their immediate call relationships.
+   - **With text selected**: the graph centers on that symbol — showing its callers (incoming) and callees (outgoing).
+3. The graph opens in a side panel.
+
+### Graph interactions
+
+| Action | Result |
+|--------|--------|
+| **Double-click** a node | Expand one level — query callers and callees of that node |
+| **Double-click** an expanded node | Collapse its subtree |
+| **Right-click** a node → `Source` | Jump to the symbol's definition in the editor |
+| Drag canvas | Pan the view |
+| Scroll | Zoom in / out |
+| Drag a node | Reposition it |
+
+### Toolbar
+
+| Button | Action |
+|--------|--------|
+| Undo / Redo | Step through expand / collapse history |
+| Reset | Return to the initial graph |
+| Zoom In / Zoom Out / Fit | Adjust the viewport |
 
 ## Extension Settings
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+This extension contributes the following settings (`codegraphG6.*`):
 
-For example:
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `codegraphG6.maxDepth` | `number` | `2` | Default expansion depth (1–10) |
+| `codegraphG6.direction` | `string` | `both` | Traversal direction: `both`, `upstream`, or `downstream` |
 
-This extension contributes the following settings:
+## Commands
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+| Command | ID | Description |
+|---------|-----|-------------|
+| `CodeGraph: Show Node Graph` | `codegraph-g6.showGraph` | Open the call graph for the current file or selected symbol |
+| `CodeGraph: Initialize / Re-index` | `codegraph-g6.manualInit` | Run CodeGraph indexing on the workspace |
 
-## Known Issues
+## How It Works
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+1. **CodeGraph** parses the project into a SQLite knowledge graph of symbols and cross-references.
+2. On `Show Node Graph`, the extension queries CodeGraph's database for nodes and edges.
+3. The data is rendered as an interactive DAG using **AntV G6** in a VS Code webview panel.
+4. Double-clicking a node triggers an incremental backend query; new nodes and edges are added without rebuilding the entire layout.
 
-## Release Notes
+## Development
 
-Users appreciate release notes as you update your extension.
+```bash
+npm install
+npm run watch        # watch + rebuild on changes
+```
 
-### 1.0.0
+Press `F5` in VS Code to launch an Extension Development Host.
 
-Initial release of ...
+## License
 
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+MIT

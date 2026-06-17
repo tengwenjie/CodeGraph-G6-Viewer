@@ -1,75 +1,82 @@
 import * as vscode from 'vscode';
-// 假设这是 CodeGraph 的标准调用方式，具体以其官方 API 文档为准
+import * as cp from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import { CodeGraph } from '@colbymchenry/codegraph';
 import { getWebviewContent } from './webview/getWebviewContent'
 
 export function activate(context: vscode.ExtensionContext) {
-    let disposable = vscode.commands.registerCommand('codegraph-g6.showGraph', async () => {
-        // 1. 获取当前编辑器
+    // ── Check CodeGraph initialization on startup ──
+    checkCodeGraphInitialized();
+
+    // ── Main command: show graph ──
+    const showGraphDisposable = vscode.commands.registerCommand('codegraph-g6.showGraph', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showErrorMessage('没有打开的编辑器');
+            vscode.window.showErrorMessage('No active editor');
             return;
         }
 
-        // 2. 获取选中的文本 和 当前文件路径
         const selection = editor.document.getText(editor.selection).trim();
         const currentFilePath = editor.document.uri.fsPath;
         const currentFileName = editor.document.fileName.split(/[/\\]/).pop() || 'Current File';
 
-        // 3. 获取当前工作区路径，用于初始化 CodeGraph
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders) {
-            vscode.window.showErrorMessage('请在一个工作区（Workspace）内使用');
+            vscode.window.showErrorMessage('Please open a workspace folder');
             return;
         }
         const workspaceRoot = workspaceFolders[0].uri.fsPath;
 
+        // Guard: refuse to run if not initialized
+        if (!CodeGraph.isInitialized(workspaceRoot)) {
+            const action = await vscode.window.showWarningMessage(
+                'CodeGraph has not been initialized for this workspace. Run initialization now?',
+                'Initialize', 'Cancel'
+            );
+            if (action === 'Initialize') {
+                await runCodeGraphInit(workspaceRoot);
+            }
+            return;
+        }
+
         try {
-            // 连接本地的 CodeGraph 数据库
             const cg = await CodeGraph.open(workspaceRoot);
 
             let graphData;
             let panelTitle;
 
-            // CodeGraph 内部使用相对路径（相对于工作区根目录）
             const relativePath = vscode.workspace.asRelativePath(currentFilePath, false);
 
-            // 4. 核心分流逻辑：判断是查单个节点，还是查整个文件
             if (selection) {
-                // 如果鼠标高亮选中了某个关键字
                 graphData = await buildGraphDataForSymbol(cg, selection, relativePath);
                 panelTitle = `Graph: ${selection}`;
             } else {
-                // 如果没有选中任何文字（只是单纯右键）
                 graphData = await buildGraphDataForFile(cg, relativePath);
                 panelTitle = `File Graph: ${currentFileName}`;
             }
 
-            // 5. 创建并打开 Webview 面板
             const panel = vscode.window.createWebviewPanel(
                 'codegraphWebview',
                 panelTitle,
-                vscode.ViewColumn.Beside, // 在侧边栏打开
+                vscode.ViewColumn.Beside,
                 { enableScripts: true, retainContextWhenHidden: true }
             );
 
-            // 6. 监听从 Webview（前端）发回来的点击消息
-            // 监听前端发回来的消息
             panel.webview.onDidReceiveMessage(async (message) => {
                 if (message.command === 'openFile') {
                     const payload = message.payload;
-                    console.log(`[openFile] 收到跳转请求: path=${payload.path}  line=${payload.line}  name=${payload.name}`);
+                    console.log(`[openFile] jump request: path=${payload.path}  line=${payload.line}  name=${payload.name}`);
 
                     if (!payload.path) {
-                        vscode.window.showWarningMessage('该节点没有文件路径信息！');
+                        vscode.window.showWarningMessage('This node has no file path information');
                         return;
                     }
 
                     try {
                         const workspaceFolders = vscode.workspace.workspaceFolders;
                         if (!workspaceFolders) {
-                            vscode.window.showErrorMessage('请先打开一个工作区/文件夹！');
+                            vscode.window.showErrorMessage('Please open a workspace folder first');
                             return;
                         }
                         const rootUri = workspaceFolders[0].uri;
@@ -82,7 +89,7 @@ export function activate(context: vscode.ExtensionContext) {
                         } else {
                             fileUri = vscode.Uri.joinPath(rootUri, payload.path);
                         }
-                        console.log(`[openFile] 解析后 Uri: ${fileUri.fsPath}`);
+                        console.log(`[openFile] resolved Uri: ${fileUri.fsPath}`);
 
                         const doc = await vscode.workspace.openTextDocument(fileUri);
                         const editor = await vscode.window.showTextDocument(doc);
@@ -94,45 +101,192 @@ export function activate(context: vscode.ExtensionContext) {
                         editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
 
                     } catch (err) {
-                        console.error('跳转失败:', err);
-                        vscode.window.showErrorMessage(`无法打开文件: ${payload.path}`);
+                        console.error('Jump failed:', err);
+                        vscode.window.showErrorMessage(`Cannot open file: ${payload.path}`);
                     }
                 }
 
                 if (message.command === 'expandNode') {
-                    const { symbol } = message.payload; // symbol = node ID
+                    const { symbol } = message.payload;
                     try {
                         const cg2 = await CodeGraph.open(workspaceRoot);
                         const newData = expandNodeById(cg2, symbol);
-                        // 去掉 symbol 自身，只返回新节点和边
                         const filteredNodes = newData.nodes.filter((n: any) => n.id !== symbol);
                         panel.webview.postMessage({
                             command: 'addNodes',
                             data: { parentId: symbol, nodes: filteredNodes, edges: newData.edges },
                         });
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`展开节点失败: ${err.message}`);
+                        vscode.window.showErrorMessage(`Expand node failed: ${err.message}`);
                     }
                 }
             });
 
-            // 7. 设置 HTML 模板
             panel.webview.html = getWebviewContent();
-            
-            // 确保 Webview 加载完毕后再发送数据
+
             setTimeout(() => {
                 panel.webview.postMessage({ command: 'renderGraph', data: graphData });
             }, 500);
 
         } catch (error: any) {
-            vscode.window.showErrorMessage(`CodeGraph 查询失败: ${error.message}`);
+            vscode.window.showErrorMessage(`CodeGraph query failed: ${error.message}`);
         }
     });
 
-    context.subscriptions.push(disposable);
+    // ── Manual init / re-index command ──
+    const manualInitDisposable = vscode.commands.registerCommand('codegraph-g6.manualInit', async () => {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders) {
+            vscode.window.showErrorMessage('Please open a workspace folder first');
+            return;
+        }
+        const workspaceRoot = workspaceFolders[0].uri.fsPath;
+        await runCodeGraphInit(workspaceRoot);
+    });
+
+    context.subscriptions.push(showGraphDisposable, manualInitDisposable);
 }
 
-// ================= 共享辅助函数：将 CodeGraph Node 写入 nodesMap =================
+// ================= Check CodeGraph initialization (silent) =================
+function checkCodeGraphInitialized() {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) { return; }
+
+    const uninitialized: string[] = [];
+    for (const folder of workspaceFolders) {
+        if (!CodeGraph.isInitialized(folder.uri.fsPath)) {
+            uninitialized.push(folder.name);
+        }
+    }
+
+    if (uninitialized.length > 0) {
+        // Silent hint — the real prompt happens when the user runs the command
+        console.log(`CodeGraph: workspace not initialized for ${uninitialized.join(', ')}. Use "CodeGraph: Initialize / Re-index" to index.`);
+    }
+}
+
+// ================= Estimate codebase size & duration =================
+function estimateCodebaseSize(workspaceRoot: string): { fileCount: number; estimatedMinutes: number } {
+    const EXCLUDE_DIRS = new Set(['node_modules', '.git', '.codegraph', 'dist', 'out', 'build', '.next', '__pycache__', 'vendor', 'target', 'bin', 'obj']);
+    const SOURCE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.java', '.cs', '.php', '.rb', '.swift', '.kt', '.dart', '.c', '.cpp', '.h', '.hpp', '.scala', '.lua', '.r', '.vue', '.svelte', '.astro']);
+    let fileCount = 0;
+
+    function walk(dir: string, depth: number) {
+        if (depth > 8) return;
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+        catch { return; }
+
+        for (const entry of entries) {
+            if (entry.isDirectory()) {
+                if (EXCLUDE_DIRS.has(entry.name)) continue;
+                walk(path.join(dir, entry.name), depth + 1);
+            } else if (entry.isFile()) {
+                if (SOURCE_EXTS.has(path.extname(entry.name).toLowerCase())) {
+                    fileCount++;
+                }
+            }
+        }
+    }
+
+    walk(workspaceRoot, 0);
+    // Rough heuristic: ~80ms per file, clamped to 0.5–30 minutes
+    const estimatedMs = Math.min(Math.max(fileCount * 80, 30000), 1800000);
+    return { fileCount, estimatedMinutes: Math.round(estimatedMs / 60000) };
+}
+
+function formatElapsed(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+function stripAnsi(text: string): string {
+    // eslint-disable-next-line no-control-regex
+    return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\[\d*[KJh]/g, '').trim();
+}
+
+function formatEstimate(minutes: number): string {
+    if (minutes < 1) return '< 1 min';
+    if (minutes === 1) return '~1 min';
+    return `~${minutes} min`;
+}
+
+// ================= Run codegraph init via child_process =================
+async function runCodeGraphInit(workspaceRoot: string): Promise<void> {
+    const { fileCount, estimatedMinutes } = estimateCodebaseSize(workspaceRoot);
+    const estimateStr = formatEstimate(estimatedMinutes);
+
+    await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `CodeGraph: Indexing (${fileCount} source files, est. ${estimateStr})`,
+        cancellable: false,
+    }, async (progress) => {
+        const startTime = Date.now();
+
+        // Elapsed-time ticker — updates every second
+        const timer = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            progress.report({ message: `Elapsed ${formatElapsed(elapsed)} / est. ${estimateStr}` });
+        }, 1000);
+
+        return new Promise<void>((resolve) => {
+            const child = cp.spawn('npx', ['@colbymchenry/codegraph', 'init'], {
+                cwd: workspaceRoot,
+                shell: true,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+
+            let stdout = '';
+            let stderr = '';
+
+            child.stdout?.on('data', (data: Buffer) => {
+                stdout += data.toString();
+            });
+
+            child.stderr?.on('data', (data: Buffer) => {
+                stderr += data.toString();
+            });
+
+            child.on('close', (code: number | null) => {
+                clearInterval(timer);
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                if (code === 0) {
+                    vscode.window.showInformationMessage(
+                        `CodeGraph initialization complete in ${formatElapsed(elapsed)}. You can now use "CodeGraph: Show Node Graph".`
+                    );
+                } else {
+                    const errMsg = stripAnsi(stderr.trim() || stdout.trim()) || `Exit code: ${code}`;
+                    vscode.window.showErrorMessage(`CodeGraph init failed after ${formatElapsed(elapsed)}: ${errMsg}`);
+                }
+                resolve();
+            });
+
+            child.on('error', (err: NodeJS.ErrnoException) => {
+                clearInterval(timer);
+                // npx not found — fall back to programmatic API
+                console.warn(`Failed to spawn npx: ${err.message}. Falling back to programmatic init.`);
+                CodeGraph.init(workspaceRoot, {
+                    onProgress: (_p) => {
+                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                        progress.report({ message: `Elapsed ${formatElapsed(elapsed)} / est. ${estimateStr}` });
+                    },
+                }).then(() => {
+                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                    vscode.window.showInformationMessage(
+                        `CodeGraph initialization complete in ${formatElapsed(elapsed)}. You can now use "CodeGraph: Show Node Graph".`
+                    );
+                    resolve();
+                }).catch((apiErr: any) => {
+                    vscode.window.showErrorMessage(`CodeGraph init failed: ${apiErr.message}`);
+                    resolve();
+                });
+            });
+        });
+    });
+}
+
+// ================= Shared helper: add a CodeGraph Node to the nodesMap =================
 function addNodeToMap(map: Map<string, any>, node: any, isRoot: boolean) {
     if (map.has(node.id)) { return; }
     console.log(`[addNodeToMap] id=${node.id}  name=${node.name}  filePath=${node.filePath}  line=${node.startLine}  kind=${node.kind}`);
@@ -147,20 +301,18 @@ function addNodeToMap(map: Map<string, any>, node: any, isRoot: boolean) {
     });
 }
 
-// ================= 数据组装逻辑 1：针对单个选中的关键字 =================
+// ================= Build graph data centered on a single selected symbol =================
 function buildGraphDataForSymbol(cg: CodeGraph, targetSymbol: string, currentFilePath: string) {
     const nodesMap = new Map<string, any>();
     const edgesList: any[] = [];
     const edgeSet = new Set<string>();
 
-    // 1. 搜索选中的关键字
     const searchResults = cg.searchNodes(targetSymbol);
 
     if (!searchResults || searchResults.length === 0) {
         return { nodes: [], edges: [] };
     }
 
-    // 2. 优先选择当前文件内的匹配结果，避免跳到其他文件的同名符号
     let centerNode = searchResults[0].node;
     for (const result of searchResults) {
         if (result.node.filePath === currentFilePath) {
@@ -168,23 +320,18 @@ function buildGraphDataForSymbol(cg: CodeGraph, targetSymbol: string, currentFil
             break;
         }
     }
-    console.log(`[buildGraphDataForSymbol] 选中符号=${targetSymbol}  中心节点=${centerNode.name}  filePath=${centerNode.filePath}`);
+    console.log(`[buildGraphDataForSymbol] symbol=${targetSymbol}  center=${centerNode.name}  filePath=${centerNode.filePath}`);
 
-    const centerId = centerNode.id;
-
-    // 把中心节点放进画布
     addNodeToMap(nodesMap, centerNode, true);
 
-    // 2. 获取上游和下游连线，补全对端节点
-    const incomingEdges = cg.getIncomingEdges(centerId) || [];
-    const outgoingEdges = cg.getOutgoingEdges(centerId) || [];
+    const incomingEdges = cg.getIncomingEdges(centerNode.id) || [];
+    const outgoingEdges = cg.getOutgoingEdges(centerNode.id) || [];
 
     for (const edge of incomingEdges) {
         const key = `${edge.source}->${edge.target}`;
         if (edgeSet.has(key)) { continue; }
         edgeSet.add(key);
         edgesList.push({ source: edge.source, target: edge.target });
-
         const sourceNode = cg.getNode(edge.source);
         if (sourceNode) { addNodeToMap(nodesMap, sourceNode, false); }
     }
@@ -194,7 +341,6 @@ function buildGraphDataForSymbol(cg: CodeGraph, targetSymbol: string, currentFil
         if (edgeSet.has(key)) { continue; }
         edgeSet.add(key);
         edgesList.push({ source: edge.source, target: edge.target });
-
         const targetNode = cg.getNode(edge.target);
         if (targetNode) { addNodeToMap(nodesMap, targetNode, false); }
     }
@@ -202,18 +348,16 @@ function buildGraphDataForSymbol(cg: CodeGraph, targetSymbol: string, currentFil
     return { nodes: Array.from(nodesMap.values()), edges: edgesList };
 }
 
-// ================= 按节点 ID 展开一层（不需要搜索，直接用 ID 查边） =================
+// ================= Expand one level by node ID (no search needed) =================
 function expandNodeById(cg: CodeGraph, nodeId: string) {
     const nodesMap = new Map<string, any>();
     const edgesList: any[] = [];
     const edgeSet = new Set<string>();
 
-    // 把中心节点放入
     const centerNode = cg.getNode(nodeId);
     if (!centerNode) return { nodes: [], edges: [] };
     addNodeToMap(nodesMap, centerNode, true);
 
-    // 查出入边
     const incoming = cg.getIncomingEdges(nodeId) || [];
     const outgoing = cg.getOutgoingEdges(nodeId) || [];
 
@@ -238,26 +382,23 @@ function expandNodeById(cg: CodeGraph, nodeId: string) {
     return { nodes: Array.from(nodesMap.values()), edges: edgesList };
 }
 
-// ================= 数据组装逻辑 2：针对整个文件 =================
+// ================= Build graph data for an entire file =================
 function buildGraphDataForFile(cg: CodeGraph, filePath: string) {
-    console.log(`[buildGraphDataForFile] 输入 filePath = ${filePath}`);
+    console.log(`[buildGraphDataForFile] input filePath = ${filePath}`);
 
     const nodesMap = new Map<string, any>();
     const edgesList: any[] = [];
     const edgeSet = new Set<string>();
 
-    // 1. 用专用 API 获取当前文件内所有节点
     const fileNodes = cg.getNodesInFile(filePath);
-    console.log(`[buildGraphDataForFile] getNodesInFile 返回 ${fileNodes.length} 个节点`);
+    console.log(`[buildGraphDataForFile] getNodesInFile returned ${fileNodes.length} nodes`);
 
-    // 2. 筛选出有实际意义的顶层符号（过滤局部变量、参数等）
     const topLevelKinds = new Set(['function', 'method', 'class', 'interface', 'struct', 'enum', 'trait', 'protocol']);
 
     for (const node of fileNodes) {
         const isTopLevel = topLevelKinds.has(node.kind);
         addNodeToMap(nodesMap, node, isTopLevel);
 
-        // 3. 只对顶层符号查询出入边，避免边爆炸
         if (!isTopLevel) { continue; }
 
         const outgoingEdges = cg.getOutgoingEdges(node.id) || [];
@@ -266,7 +407,6 @@ function buildGraphDataForFile(cg: CodeGraph, filePath: string) {
             if (edgeSet.has(key)) { continue; }
             edgeSet.add(key);
             edgesList.push({ source: edge.source, target: edge.target });
-
             const targetNode = cg.getNode(edge.target);
             if (targetNode) { addNodeToMap(nodesMap, targetNode, false); }
         }
@@ -277,7 +417,6 @@ function buildGraphDataForFile(cg: CodeGraph, filePath: string) {
             if (edgeSet.has(key)) { continue; }
             edgeSet.add(key);
             edgesList.push({ source: edge.source, target: edge.target });
-
             const sourceNode = cg.getNode(edge.source);
             if (sourceNode) { addNodeToMap(nodesMap, sourceNode, false); }
         }

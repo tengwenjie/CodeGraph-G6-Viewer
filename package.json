@@ -16,6 +16,10 @@
       {
         "command": "codegraph-g6.showGraph",
         "title": "CodeGraph: Show Node Graph"
+      },
+      {
+        "command": "codegraph-g6.manualInit",
+        "title": "CodeGraph: Initialize / Re-index"
       }
     ],
     "menus": {

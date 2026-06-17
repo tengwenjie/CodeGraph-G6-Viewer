@@ -1,4 +1,4 @@
-// ================= Webview 前端渲染模板 =================
+// ================= Webview frontend render template =================
 export function getWebviewContent() {
     return `<!DOCTYPE html>
     <html lang="en">
@@ -15,7 +15,7 @@ export function getWebviewContent() {
             }
             #mountNode { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
 
-            /* 右键菜单 */
+            /* Context menu */
             #ctxMenu {
                 display: none;
                 position: absolute; z-index: 1000;
@@ -29,13 +29,60 @@ export function getWebviewContent() {
                 color: var(--vscode-menu-foreground, #CCC); white-space: nowrap;
             }
             .ctx-item:hover { background: var(--vscode-menu-selectionBackground, #094771); }
+
+            /* Toolbar */
+            #toolbar {
+                position: absolute;
+                top: 20px;
+                right: 20px;
+                z-index: 999;
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                background-color: var(--vscode-editorWidget-background);
+                padding: 6px;
+                border: 1px solid var(--vscode-editorWidget-border);
+                border-radius: 4px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            }
+            .tool-btn {
+                background-color: var(--vscode-button-background);
+                color: var(--vscode-button-foreground);
+                border: none;
+                padding: 4px 10px;
+                border-radius: 2px;
+                cursor: pointer;
+                font-size: 12px;
+                line-height: 1;
+            }
+            .tool-btn:hover { background-color: var(--vscode-button-hoverBackground); }
+            .tool-btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+                background-color: var(--vscode-button-secondaryBackground);
+                color: var(--vscode-button-secondaryForeground);
+            }
+            .tool-sep {
+                width: 1px; height: 20px;
+                background: var(--vscode-editorWidget-border, #454545);
+                margin: 0 2px;
+            }
         </style>
         <script src="https://unpkg.com/@antv/g6@4.8.24/dist/g6.min.js"></script>
     </head>
     <body>
-        <div id="mountNode">正在渲染图谱...</div>
+        <div id="toolbar" style="display: none;">
+            <button id="btn-undo" class="tool-btn" disabled title="Go back one step">Undo</button>
+            <button id="btn-redo" class="tool-btn" disabled title="Redo">Redo</button>
+            <button id="btn-reset" class="tool-btn" title="Back to initial state">Reset</button>
+            <span class="tool-sep"></span>
+            <button id="btn-zoom-in" class="tool-btn" title="Zoom in">Zoom In</button>
+            <button id="btn-zoom-out" class="tool-btn" title="Zoom out">Zoom Out</button>
+            <button id="btn-zoom-fit" class="tool-btn" title="Fit to view">Fit</button>
+        </div>
 
-        <!-- 右键菜单 -->
+        <div id="mountNode">Loading graph...</div>
+
         <div id="ctxMenu">
             <div class="ctx-item" data-action="source">Source</div>
         </div>
@@ -44,10 +91,123 @@ export function getWebviewContent() {
             const vscode = acquireVsCodeApi();
             let graph = null;
             let currentData = null;
-            let ctxNode = null;          // 右键目标节点
-            let expandedNodes = {};      // 记录每个节点已展开的子节点 ID 列表
+            let ctxNode = null;          // right-click target node
+            let expandedNodes = {};      // tracks expanded child node IDs per parent
 
-            // ── 主题 ──
+            // ── History state stacks ──
+            let initialSnapshot = null;
+            let undoStack = [];
+            let redoStack = [];
+
+            // ── State management & toolbar ──
+            function cloneState() {
+                // Only extract essential fields; G6 injects circular refs (cfg/children/parent) that break JSON.stringify
+                const nodes = currentData.nodes.map(n => ({
+                    id: n.id, label: n.label, filePath: n.filePath, line: n.line, kind: n.kind,
+                    style: n.style ? { ...n.style } : undefined,
+                    labelCfg: n.labelCfg ? { style: { ...n.labelCfg.style } } : undefined,
+                }));
+                const edges = currentData.edges.map(e => ({
+                    source: e.source, target: e.target,
+                    style: e.style ? { ...e.style } : undefined,
+                }));
+                return {
+                    data: { nodes, edges },
+                    expanded: JSON.parse(JSON.stringify(expandedNodes))
+                };
+            }
+
+            function saveHistory() {
+                undoStack.push(cloneState());
+                redoStack = [];
+                console.log('[saveHistory] undoStack.length=', undoStack.length, ' redoStack.length=', redoStack.length);
+                updateToolbarUI();
+            }
+
+            function updateToolbarUI() {
+                const toolbar = document.getElementById('toolbar');
+                if (currentData && currentData.nodes && currentData.nodes.length > 0) {
+                    toolbar.style.display = 'flex';
+                }
+                document.getElementById('btn-undo').disabled = undoStack.length === 0;
+                document.getElementById('btn-redo').disabled = redoStack.length === 0;
+                console.log('[updateToolbarUI] undoDisabled=', undoStack.length === 0, ' redoDisabled=', redoStack.length === 0);
+            }
+
+            function applySnapshot(snapshot) {
+                console.log('[applySnapshot] restoring snapshot, nodes=', snapshot.data.nodes.length, ' expandedKeys=', Object.keys(snapshot.expanded).length);
+                currentData = snapshot.data;
+                expandedNodes = snapshot.expanded;
+                const theme = getBaseTheme();
+                updateGraphTheme(theme);
+                // Use data()+render() for full rebuild; changeData is unreliable for incremental snapshots
+                graph.data(currentData);
+                graph.render();
+                graph.fitView(20);
+                updateExpandedStyles();
+                updateToolbarUI();
+            }
+
+            // Bind button events directly (DOMContentLoaded may have already fired in webview)
+            function bindToolbarButtons() {
+                const btnUndo = document.getElementById('btn-undo');
+                const btnRedo = document.getElementById('btn-redo');
+                const btnReset = document.getElementById('btn-reset');
+                const btnZoomIn = document.getElementById('btn-zoom-in');
+                const btnZoomOut = document.getElementById('btn-zoom-out');
+                const btnZoomFit = document.getElementById('btn-zoom-fit');
+                console.log('[bindToolbarButtons] buttons found:', !!btnUndo, !!btnRedo, !!btnReset, !!btnZoomIn, !!btnZoomOut, !!btnZoomFit);
+
+                btnUndo && btnUndo.addEventListener('click', () => {
+                    if (undoStack.length === 0) return;
+                    redoStack.push(cloneState());
+                    const prevState = undoStack.pop();
+                    applySnapshot(prevState);
+                });
+
+                btnRedo && btnRedo.addEventListener('click', () => {
+                    if (redoStack.length === 0) return;
+                    undoStack.push(cloneState());
+                    const nextState = redoStack.pop();
+                    applySnapshot(nextState);
+                });
+
+                btnReset && btnReset.addEventListener('click', () => {
+                    if (!initialSnapshot) return;
+                    undoStack.push(cloneState());
+                    redoStack = [];
+                    // Restore from initial snapshot
+                    currentData = JSON.parse(JSON.stringify(initialSnapshot.data));
+                    expandedNodes = JSON.parse(JSON.stringify(initialSnapshot.expanded));
+                    const theme = getBaseTheme();
+                    updateGraphTheme(theme);
+                    graph.data(currentData);
+                    graph.render();
+                    graph.fitView(20);
+                    updateExpandedStyles();
+                    updateToolbarUI();
+                });
+
+                btnZoomIn && btnZoomIn.addEventListener('click', () => {
+                    if (!graph) return;
+                    const currentZoom = graph.getZoom();
+                    graph.zoomTo(Math.min(currentZoom * 1.3, 5), { x: graph.getWidth() / 2, y: graph.getHeight() / 2 });
+                });
+
+                btnZoomOut && btnZoomOut.addEventListener('click', () => {
+                    if (!graph) return;
+                    const currentZoom = graph.getZoom();
+                    graph.zoomTo(Math.max(currentZoom / 1.3, 0.1), { x: graph.getWidth() / 2, y: graph.getHeight() / 2 });
+                });
+
+                btnZoomFit && btnZoomFit.addEventListener('click', () => {
+                    if (!graph) return;
+                    graph.fitView(20);
+                });
+            }
+            bindToolbarButtons();
+
+            // ── Theme ──
             function getBaseTheme() {
                 const isLight = document.body.classList.contains('vscode-light');
                 return {
@@ -81,27 +241,37 @@ export function getWebviewContent() {
                 };
             }
 
-            // ── 关闭右键菜单 ──
+            // ── Close context menu ──
             function hideCtxMenu() {
                 document.getElementById('ctxMenu').style.display = 'none';
                 ctxNode = null;
             }
 
-            // ── 折叠子树 ──
+            // ── Collapse subtree ──
             function collapseChildren(nodeId) {
                 if (!graph) return;
                 const childIds = expandedNodes[nodeId];
                 if (!childIds || childIds.length === 0) return;
+
                 childIds.forEach(cid => {
-                    collapseChildren(cid); // 递归折叠子孙
+                    collapseChildren(cid); // recursively collapse descendants
                     const n = graph.findById(cid);
-                    if (n) graph.removeItem(n);
+                    if (n) {
+                        graph.removeItem(n);
+                        // Sync currentData so undo/redo stays consistent
+                        currentData.nodes = currentData.nodes.filter(node => node.id !== cid);
+                    }
                 });
-                // 移除从 nodeId 到子节点的边
+
+                // Remove edges from nodeId to children, and sync currentData
                 graph.getEdges().forEach(e => {
                     const m = e.getModel();
-                    if (m.source === nodeId && childIds.includes(m.target)) graph.removeItem(e);
+                    if (m.source === nodeId && childIds.includes(m.target)) {
+                        graph.removeItem(e);
+                    }
                 });
+                currentData.edges = currentData.edges.filter(edge => !(edge.source === nodeId && childIds.includes(edge.target)));
+
                 delete expandedNodes[nodeId];
                 graph.layout();
                 updateExpandedStyles();
@@ -122,12 +292,19 @@ export function getWebviewContent() {
                 const container = document.getElementById('mountNode');
 
                 if (!data || !data.nodes || data.nodes.length === 0) {
-                    container.innerHTML = '未查询到相关节点数据，请检查所选代码是否有关联。';
+                    container.innerHTML = 'No nodes found. Check if the selected code has any relationships.';
                     return;
                 }
 
                 container.innerHTML = '';
                 const theme = getBaseTheme();
+
+                // Initialize history snapshot
+                expandedNodes = {};
+                undoStack = [];
+                redoStack = [];
+                initialSnapshot = cloneState();
+                updateToolbarUI();
 
                 if (!graph) {
                     const width = container.scrollWidth || window.innerWidth;
@@ -144,13 +321,13 @@ export function getWebviewContent() {
                         modes: { default: ['drag-canvas', 'zoom-canvas', 'drag-node'] }
                     });
 
-                    // 双击 → 展开/折叠
+                    // Double-click → expand/collapse
                     graph.on('node:dblclick', (evt) => {
                         const model = evt.item.getModel();
                         toggleExpand(model);
                     });
 
-                    // 右键 → 显示菜单
+                    // Right-click → show context menu
                     graph.on('node:contextmenu', (evt) => {
                         evt.preventDefault();
                         evt.stopPropagation();
@@ -161,7 +338,7 @@ export function getWebviewContent() {
                         menu.style.top = evt.clientY + 'px';
                     });
 
-                    // 点击空白 → 关闭菜单
+                    // Click canvas → close menu
                     graph.on('canvas:click', () => hideCtxMenu());
                 }
 
@@ -170,19 +347,24 @@ export function getWebviewContent() {
                 graph.render();
             }
 
-            // ── 展开/折叠切换 ──
+            // ── Expand/collapse toggle ──
             function toggleExpand(model) {
                 console.log('[toggleExpand] model.id=', model.id, ' label=', model.label, ' expanded=', !!expandedNodes[model.id]);
                 if (expandedNodes[model.id] && expandedNodes[model.id].length > 0) {
+                    try { saveHistory(); } catch(e) { console.error('[toggleExpand] saveHistory failed:', e); }
                     collapseChildren(model.id);
                 } else {
                     vscode.postMessage({ command: 'expandNode', payload: { symbol: model.id } });
                 }
             }
 
-            // ── 增量添加展开节点 ──
+            // ── Incrementally add expanded nodes ──
             function addNodes(parentId, nodes, edges) {
+                console.log('[addNodes] received parentId=', parentId, ' nodes=', nodes.length, ' edges=', edges.length);
                 if (!graph) return;
+
+                try { saveHistory(); } catch(e) { console.error('[addNodes] saveHistory failed:', e); }
+
                 const theme = getBaseTheme();
                 const addedIds = [];
                 nodes.forEach(n => {
@@ -203,7 +385,8 @@ export function getWebviewContent() {
                     );
                     if (!exists) graph.addItem('edge', { source: e.source, target: e.target, style: { stroke: theme.edgeStroke, endArrow: true } });
                 });
-                // 记录展开关系 + 同步到 currentData
+
+                // Track expansion relationship + sync to currentData
                 if (!expandedNodes[parentId]) expandedNodes[parentId] = [];
                 expandedNodes[parentId].push(...addedIds);
                 currentData.nodes.push(...nodes);
@@ -213,7 +396,7 @@ export function getWebviewContent() {
                 updateExpandedStyles();
             }
 
-            // ── 主题更新 ──
+            // ── Theme update ──
             function updateGraphTheme(theme) {
                 if (!currentData) return;
                 currentData.nodes.forEach(node => {
@@ -227,11 +410,11 @@ export function getWebviewContent() {
                 });
             }
 
-            // ── 右键菜单点击 ──
+            // ── Context menu click ──
             document.getElementById('ctxMenu').addEventListener('click', (e) => {
                 const item = e.target.closest('[data-action]');
                 const action = item ? item.getAttribute('data-action') : null;
-                const node = ctxNode; // 先保存：hideCtxMenu 会清空 ctxNode
+                const node = ctxNode; // Save before hideCtxMenu clears ctxNode
                 hideCtxMenu();
                 if (!action || !node) return;
                 if (action === 'source') {
@@ -244,7 +427,7 @@ export function getWebviewContent() {
                 }
             });
 
-            // ── 消息监听 ──
+            // ── Message listener ──
             window.addEventListener('message', event => {
                 const msg = event.data;
                 if (msg.command === 'renderGraph') {
@@ -255,7 +438,7 @@ export function getWebviewContent() {
                 }
             });
 
-            // ── 主题切换监听 ──
+            // ── VS Code theme switch listener ──
             const observer = new MutationObserver((mutations) => {
                 mutations.forEach((mutation) => {
                     if (mutation.attributeName === 'class' && graph && currentData) {
