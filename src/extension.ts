@@ -1,23 +1,23 @@
 import * as vscode from 'vscode';
 // 假设这是 CodeGraph 的标准调用方式，具体以其官方 API 文档为准
 import { CodeGraph } from '@colbymchenry/codegraph';
+import { getWebviewContent } from './webview/getWebviewContent'
 
 export function activate(context: vscode.ExtensionContext) {
     let disposable = vscode.commands.registerCommand('codegraph-g6.showGraph', async () => {
-        // 1. 获取当前编辑器和选中的文本（例如函数名或类名）
+        // 1. 获取当前编辑器
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showErrorMessage('没有打开的编辑器');
             return;
         }
 
-        const selection = editor.document.getText(editor.selection);
-        if (!selection) {
-            vscode.window.showWarningMessage('请先选中一个函数名或变量名');
-            return;
-        }
+        // 2. 获取选中的文本 和 当前文件路径
+        const selection = editor.document.getText(editor.selection).trim();
+        const currentFilePath = editor.document.uri.fsPath;
+        const currentFileName = editor.document.fileName.split(/[/\\]/).pop() || 'Current File';
 
-        // 2. 获取当前工作区路径，用于初始化 CodeGraph
+        // 3. 获取当前工作区路径，用于初始化 CodeGraph
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders) {
             vscode.window.showErrorMessage('请在一个工作区（Workspace）内使用');
@@ -26,24 +26,62 @@ export function activate(context: vscode.ExtensionContext) {
         const workspaceRoot = workspaceFolders[0].uri.fsPath;
 
         try {
-            // 3. 连接本地的 CodeGraph 数据库并查询数据
+            // 连接本地的 CodeGraph 数据库
             const cg = await CodeGraph.open(workspaceRoot);
+            const searchResults = cg.searchNodes(selection);
+            console.log(`搜索 [${selection}] 的结果:`, searchResults);
             
-            // 将 CodeGraph 的数据转换为 AntV G6 的 nodes 和 edges
-            const graphData = await buildGraphData(cg, selection);
+            let graphData;
+            let panelTitle;
 
-            // 4. 创建并打开 Webview 面板
+            // 4. 核心分流逻辑：判断是查单个节点，还是查整个文件
+            if (selection) {
+                // 如果鼠标高亮选中了某个关键字
+                graphData = await buildGraphDataForSymbol(cg, selection, currentFilePath, editor);
+                panelTitle = `Graph: ${selection}`;
+            } else {
+                // 如果没有选中任何文字（只是单纯右键）
+                graphData = await buildGraphDataForFile(cg, currentFilePath);
+                panelTitle = `File Graph: ${currentFileName}`;
+            }
+
+            // 5. 创建并打开 Webview 面板
             const panel = vscode.window.createWebviewPanel(
                 'codegraphWebview',
-                `Graph: ${selection}`,
+                panelTitle,
                 vscode.ViewColumn.Beside, // 在侧边栏打开
                 { enableScripts: true, retainContextWhenHidden: true }
             );
 
-            // 5. 设置 HTML 并发送数据
+            // 6. 监听从 Webview（前端）发回来的点击消息
+            panel.webview.onDidReceiveMessage(async (message) => {
+                if (message.command === 'openFile') {
+                    const { path, line } = message.payload;
+                    if (!path) {
+                        vscode.window.showWarningMessage('该节点没有关联的源文件路径');
+                        return;
+                    }
+
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(path);
+                        const targetEditor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+
+                        // 高亮并跳转到对应行
+                        if (line) {
+                            const position = new vscode.Position(line - 1, 0);
+                            targetEditor.selection = new vscode.Selection(position, position);
+                            targetEditor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+                        }
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`无法打开文件: ${err.message}`);
+                    }
+                }
+            }, undefined, context.subscriptions);
+
+            // 7. 设置 HTML 模板
             panel.webview.html = getWebviewContent();
             
-            // 确保 Webview 加载完毕后再发送数据 (这里简单通过 setTimeout 模拟，实际中最好是 Webview 发一个 ready 消息给 Extension)
+            // 确保 Webview 加载完毕后再发送数据
             setTimeout(() => {
                 panel.webview.postMessage({ command: 'renderGraph', data: graphData });
             }, 500);
@@ -56,101 +94,104 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposable);
 }
 
-// 数据转换逻辑
-async function buildGraphData(cg: any, targetSymbol: string) {
-    const nodes = new Map<string, any>();
-    const edges: any[] = [];
+// ================= 数据组装逻辑 1：针对单个选中的关键字 =================
+// 【修复】：加上了第四个参数 editor: vscode.TextEditor
+function buildGraphDataForSymbol(cg: any, targetSymbol: string, currentFilePath: string, editor: vscode.TextEditor) {
+    const nodesMap = new Map<string, any>();
+    const edgesList: any[] = [];
 
-    // 添加中心节点
-    nodes.set(targetSymbol, { id: targetSymbol, label: targetSymbol, style: { fill: '#007ACC', stroke: '#007ACC' }, labelCfg: { style: { fill: '#fff' } } });
+    // 1. 搜索选中的关键字
+    const searchResults = cg.searchNodes(targetSymbol);
+    
+    // 如果没搜到，直接返回空图
+    if (!searchResults || searchResults.length === 0) {
+        return { nodes: [], edges: [] };
+    }
 
-    // 假设 CodeGraph 提供了 getCallers 和 getCallees API
-    const callers = await cg.getCallers(targetSymbol) || [];
-    const callees = await cg.getCallees(targetSymbol) || [];
+    const centerNode = searchResults[0].node; 
+    const centerId = centerNode.id;
 
-    // 处理调用者 (上游)
-    callers.forEach((caller: any) => {
-        const name = caller.name || caller;
-        if (!nodes.has(name)) nodes.set(name, { id: name, label: name });
-        edges.push({ source: name, target: targetSymbol });
+    // 把中心节点放进画布
+    nodesMap.set(centerId, { 
+        id: centerId, 
+        label: centerNode.name || targetSymbol, 
+        filePath: centerNode.filePath || currentFilePath, 
+        line: (editor.selection.active.line || 0) + 1, // 利用 editor 获取行号
+        kind: centerNode.kind,
+        style: { fill: '#007ACC', stroke: '#007ACC' }, 
+        labelCfg: { style: { fill: '#fff' } } 
     });
 
-    // 处理被调用者 (下游)
-    callees.forEach((callee: any) => {
-        const name = callee.name || callee;
-        if (!nodes.has(name)) nodes.set(name, { id: name, label: name });
-        edges.push({ source: targetSymbol, target: name });
-    });
+    // 3. 获取上游和下游连线
+    const incomingEdges = cg.getIncomingEdges(centerId) || [];
+    const outgoingEdges = cg.getOutgoingEdges(centerId) || [];
 
-    return { nodes: Array.from(nodes.values()), edges };
+    // 【修改点 1】：处理上游连线
+    for (const edge of incomingEdges) {
+        const sourceId = edge.source || edge.sourceId; 
+        if (!nodesMap.has(sourceId)) {
+            // 尝试通过 ID 查出真实的节点数据
+            // 如果 API 不叫 getNode，请换成真实的函数名
+            const sourceNode = cg.getNode ? cg.getNode(sourceId) : null; 
+            
+            nodesMap.set(sourceId, { 
+                id: sourceId, 
+                // 优先使用查出来的 name，查不到再回退到 ID
+                label: sourceNode ? sourceNode.name : sourceId.split('/').pop(), 
+                filePath: sourceNode ? sourceNode.filePath : null,
+                kind: sourceNode ? sourceNode.kind : null
+            });
+        }
+        edgesList.push({ source: sourceId, target: centerId });
+    }
+
+    // 【修改点 2】：处理下游连线
+    for (const edge of outgoingEdges) {
+        const targetId = edge.target || edge.targetId;
+        if (!nodesMap.has(targetId)) {
+            // 尝试通过 ID 查出真实的节点数据
+            const targetNode = cg.getNode ? cg.getNode(targetId) : null;
+
+            nodesMap.set(targetId, { 
+                id: targetId, 
+                label: targetNode ? targetNode.name : targetId.split('/').pop(), 
+                filePath: targetNode ? targetNode.filePath : null,
+                kind: targetNode ? targetNode.kind : null
+            });
+        }
+        edgesList.push({ source: centerId, target: targetId });
+    }
+
+    return { nodes: Array.from(nodesMap.values()), edges: edgesList };
 }
 
-function getWebviewContent() {
-    return `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>CodeGraph</title>
-        <style>
-            body { padding: 0; margin: 0; width: 100vw; height: 100vh; background-color: var(--vscode-editor-background); overflow: hidden; }
-            #mountNode { width: 100%; height: 100%; }
-        </style>
-        <!-- 引入 AntV G6 -->
-        <script src="https://unpkg.com/@antv/g6/dist/g6.min.js"></script>
-    </head>
-    <body>
-        <div id="mountNode"></div>
-        <script>
-            // 获取 VS Code API
-            const vscode = acquireVsCodeApi();
-            let graph = null;
+// ================= 数据组装逻辑 2：针对整个文件 =================
+function buildGraphDataForFile(cg: any, filePath: string) {
+    // 逻辑非常相似：先用 searchNodes 搜当前文件路径
+    // 如果你们的代码支持查整个文件的全量节点，也可以用类似逻辑替换
+    const searchResults = cg.searchNodes(filePath);
+    
+    const nodesMap = new Map<string, any>();
+    const edgesList: any[] = [];
 
-            function render(data) {
-                if (!graph) {
-                    const container = document.getElementById('mountNode');
-                    const width = container.scrollWidth;
-                    const height = container.scrollHeight || 600;
+    // 把当前文件相关的搜索结果都当成节点
+    searchResults.forEach((result: any) => {
+        const node = result.node;
+        nodesMap.set(node.id, {
+            id: node.id,
+            label: node.name,
+            filePath: node.filePath
+        });
 
-                    graph = new G6.Graph({
-                        container: 'mountNode',
-                        width,
-                        height,
-                        fitView: true,
-                        fitViewPadding: [20, 40, 50, 20],
-                        layout: {
-                            type: 'dagre',    // 适合代码调用关系的树形排版
-                            rankdir: 'LR',    // 从左向右排布
-                            nodesep: 40,
-                            ranksep: 80,
-                        },
-                        defaultNode: {
-                            type: 'rect',
-                            size: [120, 40],
-                            style: { radius: 4, fill: '#2A2A2A', stroke: '#555' },
-                            labelCfg: { style: { fill: '#D4D4D4', fontSize: 14 } }
-                        },
-                        defaultEdge: {
-                            type: 'cubic-horizontal',
-                            style: { stroke: '#666', endArrow: true }
-                        },
-                        modes: {
-                            default: ['drag-canvas', 'zoom-canvas', 'drag-node']
-                        }
-                    });
-                }
-                graph.data(data);
-                graph.render();
-            }
-
-            // 监听 VS Code 发来的消息
-            window.addEventListener('message', event => {
-                const message = event.data;
-                if (message.command === 'renderGraph') {
-                    render(message.data);
-                }
+        // 获取每个节点的输出连线（这里简化演示，只取输出线避免线太多）
+        const edges = cg.getOutgoingEdges(node.id) || [];
+        edges.forEach((edge: any) => {
+            edgesList.push({
+                source: edge.source || edge.sourceId,
+                target: edge.target || edge.targetId
             });
-        </script>
-    </body>
-    </html>`;
+        });
+    });
+
+    return { nodes: Array.from(nodesMap.values()), edges: edgesList };
 }

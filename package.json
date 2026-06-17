@@ -21,11 +21,34 @@
     "menus": {
       "editor/context": [
         {
-          "when": "editorHasSelection",
           "command": "codegraph-g6.showGraph",
-          "group": "navigation"
+          "group": "navigation",
+          "when": "editorTextFocus" 
         }
       ]
+    },
+    "configuration": {
+      "title": "CodeGraph G6",
+      "properties": {
+        "codegraphG6.maxDepth": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "图展开的默认最大深度"
+        },
+        "codegraphG6.direction": {
+          "type": "string",
+          "default": "both",
+          "enum": ["both", "upstream", "downstream"],
+          "enumDescriptions": [
+            "同时查询调用者和被调用者",
+            "仅查询调用者（上游）",
+            "仅查询被调用者（下游）"
+          ],
+          "description": "图展开的方向"
+        }
+      }
     }
   },
   "scripts": {
