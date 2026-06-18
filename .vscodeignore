@@ -1,4 +1,5 @@
-node_modules
+node_modules/**
+!node_modules/@colbymchenry/**
 .vscode-test/
 *.vsix
 .env

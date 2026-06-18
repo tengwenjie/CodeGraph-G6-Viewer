@@ -36,13 +36,18 @@ Indexing runs in the background via `npx @colbymchenry/codegraph init`. Progress
 
 | Action | Result |
 |--------|--------|
-| **Double-click** a node | Expand one level — query callers and callees of that node |
-| **Double-click** an expanded node | Collapse its subtree |
-| **Right-click** a node → `Source` | Jump to the symbol's definition in the editor |
+| **Double-click** a node | Expand one level — query callers and callees of that node. Expanded nodes get an orange glow highlight. |
+| **Double-click** an expanded node | Collapse its subtree (highlight removed) |
+| **Right-click** a node | Context menu with **Source** (jump to definition) and **Detail** (full node metadata) |
+| **Right-click** canvas | Context menu with **Copy YAML** and **Copy Markdown Tree** (export full graph) |
 | Drag canvas | Pan the view |
 | Scroll | Zoom in / out |
 | Drag a node | Reposition it |
 | Resize panel / window | Canvas automatically fills the new viewport |
+
+![Detail view](images/detail.png)
+
+![Canvas export menu](images/graph_export.png)
 
 ![Toolbar](images/toolbar.png)
 
@@ -51,9 +56,9 @@ Indexing runs in the background via `npx @colbymchenry/codegraph init`. Progress
 | Button | Action |
 |--------|--------|
 | Undo / Redo | Step through expand / collapse history |
-| Reset | Return to the initial graph |
+| Reset | Return to the initial graph (clears undo history) |
 | **⚠ Outdated** badge | Appears when the codebase changes behind the scenes |
-| **↻ Refresh** | Rebuild the graph from the latest indexed data |
+| **↻ Reload** | Rebuild the graph from the latest indexed data |
 | Zoom In / Zoom Out / Fit | Adjust the viewport |
 
 ### Background Sync & Stale Notification
@@ -63,7 +68,7 @@ When you save a file in the workspace:
 1. The extension debounces saves (2 s) and runs `codegraph sync` silently in the background.
 2. If a graph panel is open, a lightweight `dataStale` notification is sent — no heavy data transfer.
 3. A **⚠ Outdated** badge appears in the toolbar.
-4. Click **↻ Refresh** to rebuild the graph with the latest data. The refresh tries to preserve your current view context (symbol or file), automatically picking up renamed symbols via the cursor position.
+4. Click **↻ Reload** to rebuild the graph with the latest data. The refresh tries to preserve your current view context (symbol or file), automatically picking up renamed symbols via the cursor position.
 
 ## Extension Settings
 
@@ -87,7 +92,7 @@ This extension contributes the following settings (`codegraphG6.*`):
 2. On `Show Node Graph`, the extension queries CodeGraph for nodes and edges relevant to the current file or selected symbol.
 3. The data is rendered as an interactive DAG using **AntV G6** in a VS Code webview panel.
 4. Double-clicking a node triggers an incremental backend query; new nodes and edges are added without rebuilding the entire layout.
-5. On file save, CodeGraph runs an incremental sync. The webview is notified via a lightweight `dataStale` message — no full graph data is pushed until the user clicks Refresh.
+5. On file save, CodeGraph runs an incremental sync. The webview is notified via a lightweight `dataStale` message — no full graph data is pushed until the user clicks Reload.
 
 ## Supported Languages
 
@@ -97,6 +102,3 @@ TypeScript · JavaScript · Python · Go · Rust · Java · C# · PHP · Ruby ·
 
 *See the [CodeGraph README](https://github.com/colbymchenry/codegraph#supported-languages) for details on file extensions and framework-specific features.*
 
-## License
-
-MIT

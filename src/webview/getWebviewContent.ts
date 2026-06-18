@@ -86,7 +86,7 @@ export function getWebviewContent() {
             <button id="btn-reset" class="tool-btn" title="Back to initial state">Reset</button>
             <span class="tool-sep"></span>
             <span id="stale-badge" class="stale-badge" title="File changes detected — graph may be out of date">&#9888; Outdated</span>
-            <button id="btn-refresh" class="tool-btn" title="Refresh graph with latest data">&#x21bb; Refresh</button>
+            <button id="btn-refresh" class="tool-btn" title="Reload graph from latest indexed data">&#x21bb; Reload</button>
             <span class="tool-sep"></span>
             <button id="btn-zoom-in" class="tool-btn" title="Zoom in">Zoom In</button>
             <button id="btn-zoom-out" class="tool-btn" title="Zoom out">Zoom Out</button>
@@ -97,6 +97,9 @@ export function getWebviewContent() {
 
         <div id="ctxMenu">
             <div class="ctx-item" data-action="source">Source</div>
+            <div class="ctx-item" data-action="detail">Detail</div>
+            <div class="ctx-item" data-action="copyYml">Copy YAML</div>
+            <div class="ctx-item" data-action="copyMd">Copy Markdown Tree</div>
         </div>
 
         <script>
@@ -186,9 +189,9 @@ export function getWebviewContent() {
 
                 btnReset && btnReset.addEventListener('click', () => {
                     if (!initialSnapshot) return;
-                    undoStack.push(cloneState());
+                    // True reset: clear undo/redo, restore initial state directly
+                    undoStack = [];
                     redoStack = [];
-                    // Restore from initial snapshot
                     currentData = JSON.parse(JSON.stringify(initialSnapshot.data));
                     expandedNodes = JSON.parse(JSON.stringify(initialSnapshot.expanded));
                     const theme = getBaseTheme();
@@ -264,6 +267,17 @@ export function getWebviewContent() {
                 ctxNode = null;
             }
 
+            function showCtxMenu(x, y, isNode) {
+                const menu = document.getElementById('ctxMenu');
+                document.querySelector('[data-action="source"]').style.display = isNode ? '' : 'none';
+                document.querySelector('[data-action="detail"]').style.display = isNode ? '' : 'none';
+                document.querySelector('[data-action="copyYml"]').style.display = isNode ? 'none' : '';
+                document.querySelector('[data-action="copyMd"]').style.display = isNode ? 'none' : '';
+                menu.style.display = 'block';
+                menu.style.left = x + 'px';
+                menu.style.top = y + 'px';
+            }
+
             // ── Collapse subtree ──
             function collapseChildren(nodeId) {
                 if (!graph) return;
@@ -299,7 +313,12 @@ export function getWebviewContent() {
                 graph.getNodes().forEach(n => {
                     const m = n.getModel();
                     if (expandedNodes[m.id] && expandedNodes[m.id].length > 0) {
-                        graph.updateItem(n, { style: { ...m.style, lineWidth: 3 } });
+                        graph.updateItem(n, {
+                            style: { ...m.style, lineWidth: 3, stroke: '#FFA500', shadowColor: '#FFA500', shadowBlur: 8 }
+                        });
+                    } else {
+                        // Reset to default if collapsed
+                        graph.updateItem(n, { style: { ...m.style, lineWidth: 1.5, shadowBlur: 0 } });
                     }
                 });
             }
@@ -346,15 +365,20 @@ export function getWebviewContent() {
                         toggleExpand(model);
                     });
 
-                    // Right-click → show context menu
+                    // Right-click node → context menu with Source / Detail
                     graph.on('node:contextmenu', (evt) => {
                         evt.preventDefault();
                         evt.stopPropagation();
                         ctxNode = evt.item;
-                        const menu = document.getElementById('ctxMenu');
-                        menu.style.display = 'block';
-                        menu.style.left = evt.clientX + 'px';
-                        menu.style.top = evt.clientY + 'px';
+                        showCtxMenu(evt.clientX, evt.clientY, true);
+                    });
+
+                    // Right-click canvas → context menu with Copy YAML / Markdown Tree
+                    graph.on('canvas:contextmenu', (evt) => {
+                        evt.preventDefault();
+                        evt.stopPropagation();
+                        ctxNode = null;
+                        showCtxMenu(evt.clientX, evt.clientY, false);
                     });
 
                     // Click canvas → close menu
@@ -425,6 +449,7 @@ export function getWebviewContent() {
 
                 graph.layout();
                 updateExpandedStyles();
+                setTimeout(() => graph.fitView(20), 100);
             }
 
             // ── Theme update ──
@@ -441,20 +466,94 @@ export function getWebviewContent() {
                 });
             }
 
+            // ── YAML export ──
+            function buildYaml() {
+                if (!currentData) return '';
+                var yml = 'nodes:\\n';
+                currentData.nodes.forEach(function(n) {
+                    yml += '  - id: ' + n.id + '\\n';
+                    yml += '    name: ' + n.label + '\\n';
+                    yml += '    kind: ' + n.kind + '\\n';
+                    yml += '    file: ' + (n.filePath || '') + '\\n';
+                    yml += '    line: ' + (n.line || '') + '\\n';
+                });
+                yml += 'edges:\\n';
+                currentData.edges.forEach(function(e) {
+                    var srcNode = currentData.nodes.find(function(n) { return n.id === e.source; });
+                    var tgtNode = currentData.nodes.find(function(n) { return n.id === e.target; });
+                    yml += '  - source: ' + e.source;
+                    yml += srcNode ? ' # ' + srcNode.label : '';
+                    yml += '\\n';
+                    yml += '    target: ' + e.target;
+                    yml += tgtNode ? ' # ' + tgtNode.label : '';
+                    yml += '\\n';
+                });
+                return yml;
+            }
+
+            // ── Markdown tree export ──
+            function buildMarkdownTree() {
+                if (!currentData || !currentData.nodes.length) return '';
+                // Find root nodes (depth 0 or center-style fill)
+                const roots = currentData.nodes.filter(n =>
+                    n.style && (n.style.fill === '#007ACC' || n.style.fill === '#005A9E')
+                );
+                const startNodes = roots.length > 0 ? roots : currentData.nodes.filter(n => n.depth === 0 || !n.depth);
+                if (!startNodes.length) return '';
+
+                const visited = new Set();
+                function renderTree(nodeId, indent) {
+                    if (visited.has(nodeId)) return '';
+                    visited.add(nodeId);
+                    const node = currentData.nodes.find(n => n.id === nodeId);
+                    if (!node) return '';
+                    const prefix = '  '.repeat(indent) + '- ';
+                    var out = prefix + '**' + node.label + '**';
+                    if (node.kind) out += ' _(' + node.kind + ')_';
+                    out += '\\n';
+                    const children = currentData.edges.filter(e => e.source === nodeId);
+                    children.forEach(e => {
+                        out += renderTree(e.target, indent + 1);
+                    });
+                    return out;
+                }
+
+                let md = '';
+                startNodes.forEach(n => {
+                    visited.clear();
+                    md += renderTree(n.id, 0);
+                });
+                return md;
+            }
+
             // ── Context menu click ──
             document.getElementById('ctxMenu').addEventListener('click', (e) => {
                 const item = e.target.closest('[data-action]');
                 const action = item ? item.getAttribute('data-action') : null;
                 const node = ctxNode; // Save before hideCtxMenu clears ctxNode
                 hideCtxMenu();
-                if (!action || !node) return;
-                if (action === 'source') {
-                    const model = node.getModel();
-                    console.log('[ctxMenu] source click, model:', model.id, model.filePath, model.line);
+                if (!action) return;
+                const model = node ? node.getModel() : null;
+
+                if (action === 'source' && model) {
                     vscode.postMessage({
                         command: 'openFile',
                         payload: { name: model.id, path: model.filePath, line: model.line }
                     });
+                }
+                if (action === 'detail' && model) {
+                    vscode.postMessage({
+                        command: 'showDetail',
+                        payload: { id: model.id, name: model.label, filePath: model.filePath, line: model.line, kind: model.kind }
+                    });
+                }
+                if (action === 'copyYml') {
+                    const text = buildYaml();
+                    vscode.postMessage({ command: 'copyToClipboard', payload: { text, label: 'YAML' } });
+                }
+                if (action === 'copyMd') {
+                    const text = buildMarkdownTree();
+                    vscode.postMessage({ command: 'copyToClipboard', payload: { text, label: 'Markdown Tree' } });
                 }
             });
 

@@ -222,6 +222,48 @@ export function activate(context: vscode.ExtensionContext) {
                         vscode.window.showErrorMessage(`Refresh graph failed: ${err.message}`);
                     }
                 }
+
+                if (message.command === 'copyToClipboard') {
+                    await vscode.env.clipboard.writeText(message.payload.text);
+                    vscode.window.showInformationMessage(`Copied ${message.payload.label || 'text'} to clipboard.`);
+                }
+
+                if (message.command === 'showDetail') {
+                    const { id } = message.payload;
+                    try {
+                        const cg2 = await CodeGraph.open(workspaceRoot);
+                        const node = cg2.getNode(id);
+                        if (!node) {
+                            vscode.window.showWarningMessage('Node not found in CodeGraph database.');
+                            return;
+                        }
+                        const detail = `CodeGraph Node Detail
+========================
+ID:          ${node.id}
+Name:        ${node.name}
+Kind:        ${node.kind}
+File:        ${node.filePath || '(none)'}
+Lines:       ${node.startLine} – ${node.endLine}
+Qualified:   ${node.qualifiedName}
+Language:    ${node.language}
+Visibility:  ${node.visibility || '(none)'}
+Exported:    ${node.isExported ?? '(unknown)'}
+Static:      ${node.isStatic ?? '(unknown)'}
+Async:       ${node.isAsync ?? '(unknown)'}
+Signature:   ${node.signature || '(none)'}
+Docstring:   ${node.docstring || '(none)'}
+Decorators:  ${node.decorators?.join(', ') || '(none)'}
+Type params: ${node.typeParameters?.join(', ') || '(none)'}
+`;
+                        const doc = await vscode.workspace.openTextDocument({
+                            content: detail,
+                            language: 'plaintext',
+                        });
+                        await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside });
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Failed to show detail: ${err.message}`);
+                    }
+                }
             });
 
             panel.webview.html = getWebviewContent();
