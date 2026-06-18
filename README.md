@@ -12,7 +12,9 @@ Interactive call-graph visualization for VS Code powered by [CodeGraph](https://
 
 ## Requirements
 
-This extension requires a **CodeGraph-indexed workspace**. On first launch it detects whether the project has been initialized and prompts you to run indexing. You can also trigger indexing manually:
+This extension requires a **CodeGraph-indexed workspace**. On first launch it detects whether the project has been initialized and prompts you to run indexing.
+
+![Initialization prompt](images/initialized.png) You can also trigger indexing manually:
 
 - **Command Palette** (`Ctrl+Shift+P`) → `CodeGraph: Initialize / Re-index`
 
@@ -22,9 +24,13 @@ Indexing runs in the background via `npx @colbymchenry/codegraph init`. Progress
 
 1. Open any source file in a CodeGraph-indexed workspace.
 2. **Right-click** the editor → `CodeGraph: Show Node Graph`.
+
+   ![Right-click menu](images/menu.png)
    - **No selection**: the graph shows all functions, methods, and classes in the current file and their immediate call relationships.
    - **With text selected**: the graph centers on that symbol — showing its callers (incoming) and callees (outgoing).
 3. The graph opens in a side panel and fills it adaptively.
+
+![Graph panel](images/pannel.png)
 
 ### Graph interactions
 
@@ -37,6 +43,8 @@ Indexing runs in the background via `npx @colbymchenry/codegraph init`. Progress
 | Scroll | Zoom in / out |
 | Drag a node | Reposition it |
 | Resize panel / window | Canvas automatically fills the new viewport |
+
+![Toolbar](images/toolbar.png)
 
 ### Toolbar
 
