@@ -5,9 +5,44 @@ import * as path from 'path';
 import { CodeGraph } from '@colbymchenry/codegraph';
 import { getWebviewContent } from './webview/getWebviewContent'
 
+// ── Module-level state for background sync + stale notification ──
+let activePanel: vscode.WebviewPanel | null = null;
+let graphContext: { workspaceRoot: string; relativePath: string; selection: string } | null = null;
+let staleCount = 0;
+let syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
 export function activate(context: vscode.ExtensionContext) {
     // ── Check CodeGraph initialization on startup ──
     checkCodeGraphInitialized();
+
+    // ── File-save listener: background incremental sync ──
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument(async (doc) => {
+            const wsFolder = vscode.workspace.getWorkspaceFolder(doc.uri);
+            if (!wsFolder) { return; }
+            const root = wsFolder.uri.fsPath;
+            if (!CodeGraph.isInitialized(root)) { return; }
+
+            // Debounce: accumulate saves, sync once after 2s of inactivity
+            if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); }
+            syncDebounceTimer = setTimeout(async () => {
+                syncDebounceTimer = null;
+                try {
+                    const cg = await CodeGraph.open(root);
+                    await cg.sync();
+                    cg.close();
+                    staleCount++;
+                    console.log(`[bgSync] sync complete, staleCount=${staleCount}`);
+                    // Notify the webview that data may be stale
+                    if (activePanel) {
+                        activePanel.webview.postMessage({ command: 'dataStale' });
+                    }
+                } catch (err: any) {
+                    console.error(`[bgSync] sync failed: ${err.message}`);
+                }
+            }, 2000);
+        })
+    );
 
     // ── Main command: show graph ──
     const showGraphDisposable = vscode.commands.registerCommand('codegraph-g6.showGraph', async () => {
@@ -56,12 +91,23 @@ export function activate(context: vscode.ExtensionContext) {
                 panelTitle = `File Graph: ${currentFileName}`;
             }
 
+            // Store context for potential refresh later
+            graphContext = { workspaceRoot, relativePath, selection };
+            staleCount = 0;
+
             const panel = vscode.window.createWebviewPanel(
                 'codegraphWebview',
                 panelTitle,
                 vscode.ViewColumn.Beside,
                 { enableScripts: true, retainContextWhenHidden: true }
             );
+            activePanel = panel;
+
+            // Clean up when panel is closed
+            panel.onDidDispose(() => {
+                if (activePanel === panel) { activePanel = null; }
+                graphContext = null;
+            });
 
             panel.webview.onDidReceiveMessage(async (message) => {
                 if (message.command === 'openFile') {
@@ -118,6 +164,62 @@ export function activate(context: vscode.ExtensionContext) {
                         });
                     } catch (err: any) {
                         vscode.window.showErrorMessage(`Expand node failed: ${err.message}`);
+                    }
+                }
+
+                if (message.command === 'refreshGraph') {
+                    if (!graphContext) { return; }
+                    try {
+                        const cg2 = await CodeGraph.open(workspaceRoot);
+                        const { selection, relativePath } = graphContext;
+
+                        // Try to find a usable symbol for the current file:
+                        // 1) stored selection  2) current editor selection  3) fallback → file graph
+                        let effectiveSelection = selection;
+                        const normRelPath = relativePath.replace(/\\/g, '/');
+
+                        // Check if stored selection still exists in the current file
+                        if (effectiveSelection) {
+                            const probe = buildGraphDataForSymbol(cg2, effectiveSelection, relativePath);
+                            const found = probe.nodes.some((n: any) =>
+                                (n.filePath || '').replace(/\\/g, '/') === normRelPath
+                            );
+                            if (!found) {
+                                // Stored symbol no longer in file — try word at cursor in the same file
+                                const editor = vscode.window.activeTextEditor;
+                                const editorRelPath = editor ? vscode.workspace.asRelativePath(editor.document.uri, false).replace(/\\/g, '/') : '';
+                                if (editor && editorRelPath === normRelPath) {
+                                    let curWord = editor.document.getText(editor.selection).trim();
+                                    if (!curWord) {
+                                        const range = editor.document.getWordRangeAtPosition(editor.selection.active);
+                                        if (range) { curWord = editor.document.getText(range).trim(); }
+                                    }
+                                    if (curWord && curWord !== effectiveSelection) {
+                                        const probe2 = buildGraphDataForSymbol(cg2, curWord, relativePath);
+                                        const found2 = probe2.nodes.some((n2: any) =>
+                                            (n2.filePath || '').replace(/\\/g, '/') === normRelPath
+                                        );
+                                        if (found2) {
+                                            effectiveSelection = curWord;
+                                            graphContext.selection = curWord;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let newData;
+                        if (effectiveSelection) {
+                            newData = buildGraphDataForSymbol(cg2, effectiveSelection, relativePath);
+                            panel.title = `Graph: ${effectiveSelection}`;
+                        } else {
+                            newData = buildGraphDataForFile(cg2, relativePath);
+                            panel.title = `File Graph: ${path.basename(relativePath)}`;
+                        }
+                        staleCount = 0;
+                        panel.webview.postMessage({ command: 'renderGraph', data: newData });
+                    } catch (err: any) {
+                        vscode.window.showErrorMessage(`Refresh graph failed: ${err.message}`);
                     }
                 }
             });
@@ -313,9 +415,11 @@ function buildGraphDataForSymbol(cg: CodeGraph, targetSymbol: string, currentFil
         return { nodes: [], edges: [] };
     }
 
+    // Normalize path separators: CodeGraph uses /, VS Code may return \ on Windows
+    const normalizedCurrentPath = currentFilePath.replace(/\\/g, '/');
     let centerNode = searchResults[0].node;
     for (const result of searchResults) {
-        if (result.node.filePath === currentFilePath) {
+        if (result.node.filePath.replace(/\\/g, '/') === normalizedCurrentPath) {
             centerNode = result.node;
             break;
         }

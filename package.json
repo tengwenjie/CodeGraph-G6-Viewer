@@ -2,7 +2,9 @@
   "name": "codegraoh-g6-viewer",
   "displayName": "codegraoh-g6-viewer",
   "description": "code graph viewer",
+  "publisher": "TengWenjie",
   "version": "0.0.1",
+  "icon": "images/icon.png",
   "engines": {
     "vscode": "^1.120.0"
   },

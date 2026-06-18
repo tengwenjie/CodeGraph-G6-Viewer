@@ -67,6 +67,15 @@ export function getWebviewContent() {
                 background: var(--vscode-editorWidget-border, #454545);
                 margin: 0 2px;
             }
+            .stale-badge {
+                display: none;
+                background: #D4A017; color: #000;
+                font-size: 10px; font-weight: bold;
+                padding: 2px 6px; border-radius: 3px;
+                line-height: 1;
+            }
+            .stale-badge.visible { display: inline-block; }
+            #btn-refresh { font-weight: bold; }
         </style>
         <script src="https://unpkg.com/@antv/g6@4.8.24/dist/g6.min.js"></script>
     </head>
@@ -75,6 +84,9 @@ export function getWebviewContent() {
             <button id="btn-undo" class="tool-btn" disabled title="Go back one step">Undo</button>
             <button id="btn-redo" class="tool-btn" disabled title="Redo">Redo</button>
             <button id="btn-reset" class="tool-btn" title="Back to initial state">Reset</button>
+            <span class="tool-sep"></span>
+            <span id="stale-badge" class="stale-badge" title="File changes detected — graph may be out of date">&#9888; Outdated</span>
+            <button id="btn-refresh" class="tool-btn" title="Refresh graph with latest data">&#x21bb; Refresh</button>
             <span class="tool-sep"></span>
             <button id="btn-zoom-in" class="tool-btn" title="Zoom in">Zoom In</button>
             <button id="btn-zoom-out" class="tool-btn" title="Zoom out">Zoom Out</button>
@@ -204,6 +216,11 @@ export function getWebviewContent() {
                     if (!graph) return;
                     graph.fitView(20);
                 });
+
+                const btnRefresh = document.getElementById('btn-refresh');
+                btnRefresh && btnRefresh.addEventListener('click', () => {
+                    vscode.postMessage({ command: 'refreshGraph' });
+                });
             }
             bindToolbarButtons();
 
@@ -293,13 +310,13 @@ export function getWebviewContent() {
 
                 if (!data || !data.nodes || data.nodes.length === 0) {
                     container.innerHTML = 'No nodes found. Check if the selected code has any relationships.';
+                    graph = null;
                     return;
                 }
 
-                container.innerHTML = '';
                 const theme = getBaseTheme();
 
-                // Initialize history snapshot
+                // Initialize history snapshot (only for fresh render, not incremental addNodes)
                 expandedNodes = {};
                 undoStack = [];
                 redoStack = [];
@@ -307,6 +324,8 @@ export function getWebviewContent() {
                 updateToolbarUI();
 
                 if (!graph) {
+                    // First render: clear placeholder and create G6 instance
+                    container.innerHTML = '';
                     const width = container.scrollWidth || window.innerWidth;
                     const height = container.scrollHeight || window.innerHeight;
 
@@ -340,11 +359,23 @@ export function getWebviewContent() {
 
                     // Click canvas → close menu
                     graph.on('canvas:click', () => hideCtxMenu());
+
+                    // Resize handler: keep canvas filling the container
+                    window.addEventListener('resize', () => {
+                        if (!graph) return;
+                        const c = document.getElementById('mountNode');
+                        const w = c.scrollWidth || window.innerWidth;
+                        const h = c.scrollHeight || window.innerHeight;
+                        graph.changeSize(w, h);
+                        graph.fitView(20);
+                    });
                 }
+                // Refresh: graph already exists, canvas is intact — just swap data
 
                 updateGraphTheme(theme);
                 graph.data(data);
                 graph.render();
+                graph.fitView(20);
             }
 
             // ── Expand/collapse toggle ──
@@ -432,9 +463,14 @@ export function getWebviewContent() {
                 const msg = event.data;
                 if (msg.command === 'renderGraph') {
                     render(msg.data);
+                    // Reset stale state on refresh
+                    document.getElementById('stale-badge').classList.remove('visible');
                 }
                 if (msg.command === 'addNodes') {
                     addNodes(msg.data.parentId, msg.data.nodes, msg.data.edges);
+                }
+                if (msg.command === 'dataStale') {
+                    document.getElementById('stale-badge').classList.add('visible');
                 }
             });
 
