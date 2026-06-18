@@ -8,6 +8,7 @@
     "url": "https://github.com/tengwenjie/CodeGraph-G6-Viewer.git"
   },
   "version": "0.0.3",
+  "license": "MIT",
   "icon": "images/icon.png",
   "engines": {
     "vscode": "^1.120.0"

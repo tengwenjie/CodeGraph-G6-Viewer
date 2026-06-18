@@ -102,3 +102,7 @@ TypeScript · JavaScript · Python · Go · Rust · Java · C# · PHP · Ruby ·
 
 *See the [CodeGraph README](https://github.com/colbymchenry/codegraph#supported-languages) for details on file extensions and framework-specific features.*
 
+## License
+
+MIT
+
